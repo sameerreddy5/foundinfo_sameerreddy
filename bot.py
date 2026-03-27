@@ -7,6 +7,8 @@ import logging
 from random import randint
 from database import db
 import time
+from threading import Thread
+from flask import Flask
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -677,6 +679,19 @@ def handle_pagination(call: CallbackQuery):
     except Exception:
         bot.answer_callback_query(call.id, "Error switching pages.")
 
+# --- Render Free Tier Keep-Alive ---
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return "Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
 if __name__ == "__main__":
     logger.info("Bot is starting...")
+    # Start web server in a separate thread for Render free tier
+    Thread(target=run_web).start()
     bot.infinity_polling()
