@@ -5,6 +5,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from dotenv import load_dotenv
 import logging
 from random import randint
+import uuid
 from database import db
 import time
 from threading import Thread
@@ -25,7 +26,7 @@ if not all([BOT_TOKEN, API_TOKEN, API_URL]):
     logger.error("Missing environment variables. Please check your .env file.")
     exit(1)
 
-bot = telebot.TeleBot(BOT_TOKEN, num_threads=50)
+bot = telebot.TeleBot(BOT_TOKEN, num_threads=100)
 
 # In-memory storage for pagination results
 cache_reports = {}
@@ -63,6 +64,9 @@ def get_main_menu_keyboard():
     )
     markup.row(
         InlineKeyboardButton(f"{UI_EMOJI_MENU} Menu", callback_data="menu:menu"),
+        InlineKeyboardButton(f"{UI_EMOJI_CREDIT} Credits", callback_data="menu:credits")
+    )
+    markup.row(
         InlineKeyboardButton("💬 Contact Support", callback_data="menu:support")
     )
     return markup
@@ -291,6 +295,24 @@ def handle_menu_navigation(call: CallbackQuery):
     elif action == "support":
         bot.edit_message_text("💬 <b>Contact Support:</b> @flashman66", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_button())
         
+    elif action == "credits":
+        user_credits = db.get_user_credits(call.from_user.id)
+        pricing_text = f"""<b>🪙 Your Balance:</b> <code>{user_credits} Credits</code>
+
+🛡 ᴄʜᴏᴏꜱᴇ ᴀ ᴘʟᴀɴ
+
+━━━━━━━━━━━━━━━━━━
+💰 ᴄʀᴇᴅɪᴛ ᴘᴀᴄᴋs
+  ⚡️ 20 ᴄʀᴇᴅɪᴛs   →  ₹85
+  ⚡️ 50 ᴄʀᴇᴅɪᴛs   →  ₹155
+  ⚡️ 100 ᴄʀᴇᴅɪᴛs →  ₹255
+💎 ᴜɴʟɪᴍɪᴛᴇᴅ ᴘʟᴀɴs
+  ✨ 7 ᴅᴀʏs  →  ₹555
+  ✨ 30 ᴅᴀʏs  →  ₹2555
+━━━━━━━━━━━━━━━━━━
+Message the Pack / Plan to 💬 Contact Support: @flashman66"""
+        bot.edit_message_text(pricing_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_button())
+        
     elif action == "faq_list":
         bot.edit_message_text("❓ <b>Frequently Asked Questions</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_faq_list_keyboard())
         
@@ -309,9 +331,38 @@ def handle_admin_actions(call: CallbackQuery):
         bot.edit_message_text(f"{UI_EMOJI_ADMIN} <b>Admin Control Panel</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_admin_main_keyboard())
         
     elif action == "stats":
+        parts = call.data.split(':')
+        page = int(parts[2]) if len(parts) > 2 else 0
+        limit = 30
+        skip = page * limit
+        
         user_count = db.get_users_count()
-        text = f"📊 <b>Bot Statistics</b>\n\nTotal Users: <code>{user_count}</code>"
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_admin_back_keyboard())
+        import math
+        total_pages = math.ceil(user_count / limit) if user_count > 0 else 1
+        
+        text = f"📊 <b>Bot Statistics</b>\n\nTotal Users: <code>{user_count}</code>\n\n<b>Recent Users (Page {page + 1}/{total_pages}):</b>\n"
+        
+        users_info = db.get_all_users_info(skip=skip, limit=limit)
+        for u in users_info:
+            uid = u.get('user_id', 'Unknown')
+            uname = u.get('username')
+            fname = u.get('first_name', '')
+            credits = u.get('credits', 0)
+            name_display = f"@{uname}" if uname and uname != "None" else fname
+            text += f"• <code>{uid}</code> - {name_display} (🪙 {credits})\n"
+            
+        markup = InlineKeyboardMarkup()
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin:stats:{page - 1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin:stats:{page + 1}"))
+            
+        if nav_buttons:
+            markup.row(*nav_buttons)
+            
+        markup.row(InlineKeyboardButton("⬅️ Back to Admin", callback_data="admin:main"))
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
         
     elif action == "broadcast_prompt":
         user_states[call.from_user.id] = "waiting_broadcast"
@@ -322,7 +373,9 @@ def handle_admin_actions(call: CallbackQuery):
         text = "👥 <b>Admins List:</b>\n\n"
         for a in admins:
             text += f"• <code>{a['user_id']}</code> (@{a['username']})\n"
-        text += "\nTo add: <code>/addadmin ID username</code>\nTo remove: <code>/remadmin ID</code>"
+        text += "\n<b>Management Commands:</b>\n"
+        text += "➕ <code>/addadmin ID username</code>\n<i>(Grants admin panel access to a specific user)</i>\n\n"
+        text += "➖ <code>/remadmin ID</code>\n<i>(Revokes admin privileges from a user)</i>"
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_admin_back_keyboard())
         
     elif action == "blacklist_list":
@@ -330,7 +383,10 @@ def handle_admin_actions(call: CallbackQuery):
         text = "🚫 <b>Blacklisted Items:</b>\n\n"
         for b in blocked:
             text += f"• <code>{b['value']}</code>\n"
-        text += "\nTo add: <code>/block value</code>\nTo remove: <code>/unblock value</code>"
+            
+        text += "\n<b>Management Commands:</b>\n"
+        text += "🔒 <code>/block value</code>\n<i>(Prevents users from querying this specific term/number)</i>\n\n"
+        text += "🔓 <code>/unblock value</code>\n<i>(Removes the block, allowing it to be searched again)</i>"
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_admin_back_keyboard())
     
     elif action == "credits_main":
@@ -347,7 +403,7 @@ def handle_admin_actions(call: CallbackQuery):
         bot.edit_message_text("💰 <b>Enter the amount of credits to add to ALL users.</b>\nType <code>/cancel</code> to abort.", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_button("admin:credits_main"))
 
     elif action == "credits_user_prompt":
-        bot.edit_message_text("👤 <b>To manage a specific user's credits, use commands:</b>\n\n<code>/addcredits ID amount</code>\n<code>/setcredits ID amount</code>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_button("admin:credits_main"))
+        bot.edit_message_text("👤 <b>To manage a specific user's credits, use commands:</b>\n\n➕ <code>/addcredits ID amount</code>\n<i>(Adds credits to their current balance)</i>\n\n➖ <code>/removecredits ID amount</code>\n<i>(Subtracts credits from their current balance)</i>\n\n✏️ <code>/setcredits ID amount</code>\n<i>(Overrides their old balance and sets it exactly to this number)</i>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_button("admin:credits_main"))
 
 # --- Admin Commands for Management ---
 
@@ -362,6 +418,20 @@ def add_credits_cmd(message):
         amt = int(parts[2])
         db.add_credits(uid, amt)
         bot.reply_to(message, f"✅ Added <code>{amt}</code> credits to user <code>{uid}</code>.", parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+@bot.message_handler(func=lambda m: db.is_admin(m.from_user.id) and m.text.startswith('/removecredits'))
+def remove_credits_cmd(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 3:
+            bot.reply_to(message, "Usage: <code>/removecredits ID amount</code>", parse_mode="HTML")
+            return
+        uid = int(parts[1])
+        amt = int(parts[2])
+        db.add_credits(uid, -amt)
+        bot.reply_to(message, f"✅ Removed <code>{amt}</code> credits from user <code>{uid}</code>.", parse_mode="HTML")
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
 
@@ -515,6 +585,10 @@ def generate_report(query, query_id):
         if not pages:
             pages = [f"{UI_EMOJI_WARN} <b>No results found for your query.</b>"]
             
+        # Prevent memory leak under high usage
+        if len(cache_reports) > 500:
+            cache_reports.pop(next(iter(cache_reports)))
+            
         cache_reports[str(query_id)] = {"pages": pages, "found": found_results}
         return pages, found_results
 
@@ -612,7 +686,7 @@ def handle_text_messages(message):
         bot.reply_to(message, "⚠️ <b>Administrator blocked this details.</b>", parse_mode="HTML")
         return
 
-    query_id = randint(100000, 999999)
+    query_id = uuid.uuid4().hex[:8]
     status_msg = bot.reply_to(message, f"{UI_EMOJI_SEARCH} Searching for <code>{query_text}</code>...", parse_mode="HTML")
     
     report_pages, found_results = generate_report(query_text, query_id)
@@ -693,5 +767,7 @@ def run_web():
 if __name__ == "__main__":
     logger.info("Bot is starting...")
     # Start web server in a separate thread for Render free tier
-    Thread(target=run_web).start()
+    web_thread = Thread(target=run_web)
+    web_thread.daemon = True
+    web_thread.start()
     bot.infinity_polling()

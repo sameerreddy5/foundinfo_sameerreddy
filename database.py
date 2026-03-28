@@ -57,6 +57,9 @@ class Database:
     def get_all_user_ids(self):
         return [user["user_id"] for user in self.users.find({}, {"user_id": 1})]
 
+    def get_all_users_info(self, skip=0, limit=50):
+        return list(self.users.find({}, {"_id": 0}).sort("_id", -1).skip(skip).limit(limit))
+
     # --- Admin Management ---
     def add_admin(self, user_id, username):
         admin_data = {
