@@ -46,6 +46,8 @@ UI_EMOJI_FAQ = "❓"
 UI_EMOJI_CAR = "🚗"
 UI_EMOJI_ADMIN = "🛡️"
 UI_EMOJI_CREDIT = "🪙"
+UI_EMOJI_BLOCK = "🚫"
+UI_EMOJI_TARGETED_BROADCAST = "🎯"
 
 def get_bot_name():
     try:
@@ -112,6 +114,10 @@ def get_admin_main_keyboard():
     markup.row(
         InlineKeyboardButton("📊 Statistics", callback_data="admin:stats"),
         InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcast_prompt")
+    )
+    markup.row(
+        InlineKeyboardButton(f"{UI_EMOJI_TARGETED_BROADCAST} Targeted Broadcast", callback_data="admin:broadcast_targeted_prompt"),
+        InlineKeyboardButton(f"{UI_EMOJI_BLOCK} Blocked Users", callback_data="admin:blocked_list")
     )
     markup.row(
         InlineKeyboardButton("👥 Manage Admins", callback_data="admin:list"),
@@ -247,6 +253,13 @@ def get_leakage_list_content():
 @bot.message_handler(commands=['start', 'menu'])
 def send_welcome(message):
     user_id = message.from_user.id
+    
+    # Check if user is blocked
+    if db.is_user_blocked(user_id):
+        # Silently ignore or send a single notification if you want
+        # For now, we follow the plan to ignore.
+        return
+
     user_name = message.from_user.first_name
     username = message.from_user.username
     bot_name = get_bot_name()
@@ -389,6 +402,24 @@ def handle_admin_actions(call: CallbackQuery):
         text += "🔓 <code>/unblock value</code>\n<i>(Removes the block, allowing it to be searched again)</i>"
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_admin_back_keyboard())
     
+    elif action == "broadcast_targeted_prompt":
+        user_states[call.from_user.id] = "waiting_broadcast_target"
+        bot.edit_message_text("🎯 <b>Targeted Broadcast</b>\n\nSend the User ID(s) you want to message, separated by commas if multiple.\n\nExample: <code>1234567, 8901234</code>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_admin_broadcast_keyboard())
+
+    elif action == "blocked_list":
+        blocked = db.get_blocked_users()
+        text = "🚫 <b>Blocked Users:</b>\n\n"
+        if not blocked:
+            text += "No users blocked."
+        else:
+            for b in blocked:
+                text += f"• <code>{b['user_id']}</code> (@{b.get('username', 'N/A')}) - {b.get('first_name', 'No Name')}\n"
+        
+        text += "\n<b>Management Commands:</b>\n"
+        text += "🔒 <code>/blockuser ID</code>\n"
+        text += "🔓 <code>/unblockuser ID</code>"
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_admin_back_keyboard())
+
     elif action == "credits_main":
         start_credits = db.get_starting_credits()
         text = f"{UI_EMOJI_CREDIT} <b>Credit Management</b>\n\nCurrent Starting Credits: <code>{start_credits}</code>"
@@ -494,6 +525,32 @@ def unblock_item(message):
         return
     db.remove_from_blacklist(parts[1].strip().lower())
     bot.reply_to(message, f"✅ <code>{parts[1]}</code> removed from blacklist.", parse_mode="HTML")
+
+@bot.message_handler(func=lambda m: db.is_admin(m.from_user.id) and m.text.startswith('/blockuser'))
+def block_user_cmd(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: <code>/blockuser ID</code>", parse_mode="HTML")
+            return
+        target_id = int(parts[1])
+        db.block_user(target_id)
+        bot.reply_to(message, f"🚫 User <code>{target_id}</code> has been blocked.", parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+@bot.message_handler(func=lambda m: db.is_admin(m.from_user.id) and m.text.startswith('/unblockuser'))
+def unblock_user_cmd(message):
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "Usage: <code>/unblockuser ID</code>", parse_mode="HTML")
+            return
+        target_id = int(parts[1])
+        db.unblock_user(target_id)
+        bot.reply_to(message, f"✅ User <code>{target_id}</code> has been unblocked.", parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('faq:'))
 def handle_faq(call: CallbackQuery):
@@ -617,6 +674,10 @@ def create_keyboard(query_id, page_index, total_pages):
 def handle_text_messages(message):
     user_id = message.from_user.id
     
+    # Check if user is blocked
+    if db.is_user_blocked(user_id):
+        return
+
     # Handle /cancel
     if message.text == "/cancel":
         if user_id in user_states:
@@ -638,6 +699,8 @@ def handle_text_messages(message):
             users = db.get_all_user_ids()
             success_count = 0
             for uid in users:
+                if db.is_user_blocked(uid):
+                    continue
                 try:
                     bot.send_message(uid, f"📢 <b>Announcement</b>\n\n{message.text}", parse_mode="HTML")
                     success_count += 1
@@ -647,6 +710,40 @@ def handle_text_messages(message):
             bot.reply_to(message, f"✅ Broadcast sent to <code>{success_count}</code> users.")
             return
         
+        elif state == "waiting_broadcast_target":
+            targets = [t.strip() for t in message.text.split(',')]
+            valid_targets = []
+            for t in targets:
+                if t.isdigit():
+                    valid_targets.append(int(t))
+            
+            if not valid_targets:
+                bot.reply_to(message, "❌ No valid User IDs found. Action cancelled.")
+                del user_states[user_id]
+                return
+                
+            user_states[user_id] = {"state": "waiting_broadcast_message_targeted", "targets": valid_targets}
+            bot.reply_to(message, f"🎯 Targets set: <code>{len(valid_targets)}</code> users.\n\nNow send the <b>message</b> you want to broadcast to them.", parse_mode="HTML", reply_markup=get_admin_broadcast_keyboard())
+            return
+
+        elif isinstance(user_states[user_id], dict) and user_states[user_id].get("state") == "waiting_broadcast_message_targeted":
+            targets = user_states[user_id]["targets"]
+            broadcast_text = message.text
+            del user_states[user_id]
+            
+            success_count = 0
+            for uid in targets:
+                if db.is_user_blocked(uid):
+                    continue
+                try:
+                    bot.send_message(uid, f"📢 <b>Important Message</b>\n\n{broadcast_text}", parse_mode="HTML")
+                    success_count += 1
+                    time.sleep(0.05)
+                except Exception:
+                    pass
+            bot.reply_to(message, f"✅ Targeted broadcast sent to <code>{success_count}</code> / {len(targets)} users.")
+            return
+
         elif state == "waiting_credits_start":
             try:
                 amt = int(message.text)

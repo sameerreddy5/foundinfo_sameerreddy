@@ -60,6 +60,19 @@ class Database:
     def get_all_users_info(self, skip=0, limit=50):
         return list(self.users.find({}, {"_id": 0}).sort("_id", -1).skip(skip).limit(limit))
 
+    def block_user(self, user_id):
+        self.users.update_one({"user_id": user_id}, {"$set": {"is_blocked": True}})
+
+    def unblock_user(self, user_id):
+        self.users.update_one({"user_id": user_id}, {"$unset": {"is_blocked": ""}})
+
+    def is_user_blocked(self, user_id):
+        user = self.users.find_one({"user_id": user_id})
+        return user.get("is_blocked", False) if user else False
+
+    def get_blocked_users(self):
+        return list(self.users.find({"is_blocked": True}, {"_id": 0, "user_id": 1, "username": 1, "first_name": 1}))
+
     # --- Admin Management ---
     def add_admin(self, user_id, username):
         admin_data = {
