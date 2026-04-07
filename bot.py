@@ -726,7 +726,8 @@ def handle_text_messages(message):
                 except Exception:
                     pass
             
-            bot.reply_to(message, "✅ <b>Your query has been sent to our support team.</b>", parse_mode="HTML")
+            # Show main menu after submission
+            send_welcome(message)
             return
 
         elif isinstance(state, dict) and state.get("state") == "replying_to_support":
