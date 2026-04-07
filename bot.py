@@ -306,7 +306,8 @@ def handle_menu_navigation(call: CallbackQuery):
         bot.edit_message_text("🗃 <b>What are you interested in?</b>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_menu_keyboard())
         
     elif action == "support":
-        bot.edit_message_text("💬 <b>Contact Support:</b> @flashman66", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_button())
+        user_states[call.from_user.id] = "waiting_support_query"
+        bot.edit_message_text("💬 <b>Type your query here:</b>\n\n<i>An admin will review your message and reply as soon as possible.</i>", call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_button())
         
     elif action == "credits":
         user_credits = db.get_user_credits(call.from_user.id)
@@ -323,7 +324,7 @@ def handle_menu_navigation(call: CallbackQuery):
   ✨ 7 ᴅᴀʏs  →  ₹555
   ✨ 30 ᴅᴀʏs  →  ₹2555
 ━━━━━━━━━━━━━━━━━━
-Message the Pack / Plan to 💬 Contact Support: @flashman66"""
+Message the Pack / Plan to 💬 Contact Support in Menu."""
         bot.edit_message_text(pricing_text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_back_button())
         
     elif action == "faq_list":
@@ -670,7 +671,18 @@ def create_keyboard(query_id, page_index, total_pages):
     markup.add(InlineKeyboardButton("🏠 Back to Menu", callback_data="menu:main"))
     return markup
 
-@bot.message_handler(func=lambda message: True)
+@bot.callback_query_handler(func=lambda call: call.data.startswith('support:'))
+def handle_support_callbacks(call: CallbackQuery):
+    parts = call.data.split(':')
+    action = parts[1]
+    
+    if action == "reply":
+        target_user_id = int(parts[2])
+        user_states[call.from_user.id] = {"state": "replying_to_support", "target_user_id": target_user_id}
+        bot.send_message(call.message.chat.id, f"⌨️ <b>Please type your reply to user <code>{target_user_id}</code>.</b>\n\n<i>You can send text, photos, or other media.</i>", parse_mode="HTML")
+        bot.answer_callback_query(call.id)
+
+@bot.message_handler(content_types=['text', 'photo', 'document', 'video', 'voice'])
 def handle_text_messages(message):
     user_id = message.from_user.id
     
@@ -690,8 +702,43 @@ def handle_text_messages(message):
         state = user_states[user_id]
         
         # If it's a command, abort the state
-        if message.text.startswith('/'):
+        if message.text and message.text.startswith('/'):
             del user_states[user_id]
+            return
+
+        if state == "waiting_support_query":
+            del user_states[user_id]
+            admins = db.get_all_admins()
+            
+            support_header = (
+                f"📩 <b>New Support Query</b>\n\n"
+                f"👤 <b>From:</b> {message.from_user.first_name} (@{message.from_user.username if message.from_user.username else 'N/A'})\n"
+                f"🆔 <b>User ID:</b> <code>{user_id}</code>\n\n"
+            )
+            
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("↩️ Reply", callback_data=f"support:reply:{user_id}"))
+            
+            for admin in admins:
+                try:
+                    bot.send_message(admin['user_id'], support_header, parse_mode="HTML")
+                    bot.copy_message(admin['user_id'], message.chat.id, message.message_id, reply_markup=markup)
+                except Exception:
+                    pass
+            
+            bot.reply_to(message, "✅ <b>Your query has been sent to our support team.</b>", parse_mode="HTML")
+            return
+
+        elif isinstance(state, dict) and state.get("state") == "replying_to_support":
+            target_id = state["target_user_id"]
+            del user_states[user_id]
+            
+            try:
+                bot.send_message(target_id, "💬 <b>Support Team Reply:</b>", parse_mode="HTML")
+                bot.copy_message(target_id, message.chat.id, message.message_id)
+                bot.reply_to(message, "✅ <b>Reply sent successfully.</b>", parse_mode="HTML")
+            except Exception as e:
+                bot.reply_to(message, f"❌ <b>Error sending reply:</b> {e}", parse_mode="HTML")
             return
 
         if state == "waiting_broadcast":
@@ -765,17 +812,22 @@ def handle_text_messages(message):
             return
 
     # --- Credit Check ---
-    user_credits = db.get_user_credits(user_id)
-    if user_credits <= 0 and not db.is_admin(user_id):
-        no_credits_text = (
-            f"❌ <b>You don't have enough credits!</b>\n\n"
-            f"You have used up all your free credits. To purchase more, please contact our support:\n"
-            f"💬 @flashman66"
-        )
-        bot.reply_to(message, no_credits_text, parse_mode="HTML")
+    # Only check credits for non-commands and non-admins
+    is_command = message.text.startswith('/') if message.text else False
+    if not is_command and not db.is_admin(user_id):
+        user_credits = db.get_user_credits(user_id)
+        if user_credits <= 0:
+            no_credits_text = (
+                f"❌ <b>You don't have enough credits!</b>\n\n"
+                f"You have used up all your free credits. To purchase more, please contact our support in the main menu."
+            )
+            bot.reply_to(message, no_credits_text, parse_mode="HTML")
+            return
+
+    # Default to search logic (only if it's text)
+    if message.content_type != 'text':
         return
 
-    # Default to search logic
     query_text = message.text
     
     # Check blacklist
